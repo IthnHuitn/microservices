@@ -1,0 +1,91 @@
+services:
+  gateway:
+    build: 
+      context: ./nginx
+      dockerfile: Dockerfile
+    container_name: api-gateway
+    ports:
+      - "8080:80"
+    environment:
+      - SECURITY_SERVICE=security
+      - SECURITY_PORT=5000
+      - UPLOADER_SERVICE=uploader
+      - UPLOADER_PORT=5001
+      - MINIO_SERVICE=minio
+      - MINIO_PORT=9000
+    depends_on:
+      - security
+      - uploader
+      - minio
+      - minio-init
+    networks:
+      - app-network
+
+  security:
+    build: ./security
+    container_name: security-service
+    environment:
+      - FLASK_ENV=development
+      - SECRET_KEY=your-super-secret-key-change-in-production
+    ports:
+      - "5000:5000"
+    networks:
+      - app-network
+
+  uploader:
+    build: ./uploader
+    container_name: uploader-service
+    environment:
+      - MINIO_ENDPOINT=minio:9000
+      - MINIO_ACCESS_KEY=minioadmin
+      - MINIO_SECRET_KEY=minioadmin
+      - MINIO_BUCKET=images
+    ports:
+      - "5001:5001"
+    networks:
+      - app-network
+    depends_on:
+      - minio
+      - minio-init
+
+  minio:
+    image: minio/minio:latest
+    container_name: minio-service
+    environment:
+      - MINIO_ROOT_USER=minioadmin
+      - MINIO_ROOT_PASSWORD=minioadmin
+    command: server /data --console-address ":9001"
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    networks:
+      - app-network
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  minio-init:
+    image: minio/mc
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+      mc alias set local http://minio:9000 minioadmin minioadmin;
+      mc mb local/images --ignore-existing;
+      mc anonymous set download local/images;
+      echo 'MinIO bucket images configured'
+      "
+    networks:
+      - app-network
+
+networks:
+  app-network:
+    driver: bridge
+
+volumes:
+  minio_data:

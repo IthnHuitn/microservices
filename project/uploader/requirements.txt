@@ -1,0 +1,4 @@
+Flask==2.3.2
+Pillow==10.0.0
+minio==7.1.17
+requests==2.31.0
