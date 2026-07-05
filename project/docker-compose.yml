@@ -1,0 +1,221 @@
+services:
+  # ============ Основные сервисы ============
+  gateway:
+    build: 
+      context: ./nginx
+      dockerfile: Dockerfile
+    container_name: api-gateway
+    ports:
+      - "8080:80"
+    environment:
+      - SECURITY_SERVICE=security
+      - SECURITY_PORT=5000
+      - UPLOADER_SERVICE=uploader
+      - UPLOADER_PORT=5001
+      - MINIO_SERVICE=minio
+      - MINIO_PORT=9000
+    depends_on:
+      - security
+      - uploader
+      - minio
+      - minio-init
+    networks:
+      - app-network
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  security:
+    build: ./security
+    container_name: security-service
+    environment:
+      - FLASK_ENV=development
+      - SECRET_KEY=your-super-secret-key-change-in-production
+    ports:
+      - "5000:5000"
+    networks:
+      - app-network
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  uploader:
+    build: ./uploader
+    container_name: uploader-service
+    environment:
+      - MINIO_ENDPOINT=minio:9000
+      - MINIO_ACCESS_KEY=minioadmin
+      - MINIO_SECRET_KEY=minioadmin
+      - MINIO_BUCKET=images
+    ports:
+      - "5001:5001"
+    networks:
+      - app-network
+    depends_on:
+      - minio
+      - minio-init
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  minio:
+    image: minio/minio:latest
+    container_name: minio-service
+    environment:
+      - MINIO_ROOT_USER=minioadmin
+      - MINIO_ROOT_PASSWORD=minioadmin
+    command: server /data --console-address ":9001"
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    networks:
+      - app-network
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  minio-init:
+    image: minio/mc
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+      mc alias set local http://minio:9000 minioadmin minioadmin;
+      mc mb local/images --ignore-existing;
+      mc anonymous set download local/images;
+      echo 'MinIO bucket images configured'
+      "
+    networks:
+      - app-network
+
+  # ============ Система логирования (Vector + ELK) ============
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.11.0
+    container_name: elasticsearch
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=true
+      - ELASTIC_PASSWORD=qwerty123456
+      - "ES_JAVA_OPTS=-Xms512m -Xmx512m"
+      - network.host=0.0.0.0
+      - xpack.security.enrollment.enabled=false
+      - xpack.security.http.ssl.enabled=false
+      - xpack.security.transport.ssl.enabled=false
+    ports:
+      - "9200:9200"
+    volumes:
+      - elasticsearch_data:/usr/share/elasticsearch/data
+    networks:
+      - app-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "-u", "elastic:qwerty123456", "http://localhost:9200/_cluster/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  elasticsearch-init:
+    build:
+      context: ./elasticsearch
+      dockerfile: Dockerfile.init
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+    networks:
+      - app-network
+
+  kibana:
+    image: docker.elastic.co/kibana/kibana:8.11.0
+    container_name: kibana
+    environment:
+      - ELASTICSEARCH_HOSTS=http://elasticsearch:9200
+      - ELASTICSEARCH_USERNAME=kibana_system
+      - ELASTICSEARCH_PASSWORD=qwerty123456
+      - XPACK_SECURITY_ENABLED=true
+      - XPACK_ENCRYPTEDSAVEDOBJECTS_ENCRYPTIONKEY=min-32-byte-long-encryption-key123
+      - SERVER_PUBLICBASEURL=http://localhost:8081
+    ports:
+      - "8081:5601"
+    depends_on:
+ #     elasticsearch:
+ #       condition: service_healthy
+      elasticsearch-init:
+        condition: service_completed_successfully
+    networks:
+      - app-network
+
+  vector:
+    image: timberio/vector:0.34.1-alpine
+    container_name: vector
+    user: root
+    volumes:
+      - ./vector/vector.toml:/etc/vector/vector.toml:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+    networks:
+      - app-network
+    command: --config /etc/vector/vector.toml
+
+  # ============ Система мониторинга ============
+  prometheus:
+    image: prom/prometheus:v3.2.1
+    container_name: prometheus
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+    ports:
+      - "9090:9090"
+    networks:
+      - app-network
+    depends_on:
+      - security
+      - uploader
+      - minio
+
+  grafana:
+    image: grafana/grafana:11.5.2
+    container_name: grafana
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=qwerty123456
+    ports:
+      - "3000:3000"
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./grafana/provisioning/datasources:/etc/grafana/provisioning/datasources:ro
+      - ./grafana/provisioning/dashboards:/etc/grafana/provisioning/dashboards:ro
+    networks:
+      - app-network
+    depends_on:
+      - prometheus
+
+networks:
+  app-network:
+    driver: bridge
+
+volumes:
+  minio_data:
+  elasticsearch_data:
+  prometheus_data:
+  grafana_data:

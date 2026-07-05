@@ -1,0 +1,29 @@
+[sources.docker_logs]
+type = "docker_logs"
+docker_host = "unix:///var/run/docker.sock"
+
+[transforms.clean_logs]
+type = "remap"
+inputs = ["docker_logs"]
+source = '''
+.@timestamp = now()
+# Удаляем конфликтующие Docker-метки
+del(.label)
+'''
+
+[sinks.elasticsearch]
+type = "elasticsearch"
+inputs = ["clean_logs"]
+endpoints = ["http://elasticsearch:9200"]
+auth.strategy = "basic"
+auth.user = "admin"
+auth.password = "qwerty123456"
+bulk.index = "logs-%Y.%m.%d"
+bulk.action = "create"
+compression = "none"
+request.timeout_secs = 30
+
+[sinks.elasticsearch.buffer]
+type = "disk"
+max_size = 268435488
+when_full = "block"
